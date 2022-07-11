@@ -4,6 +4,7 @@ import torch
 import torch.fx as fx
 
 from torch.testing._internal.common_utils import TestCase
+from torch.fx.passes.infra.pass_base import PassResult
 from torch.fx.passes.infra.pass_manager import (
     PassManager,
     this_before_that_pass_constraint,
@@ -11,16 +12,20 @@ from torch.fx.passes.infra.pass_manager import (
 )
 
 def replace_add_with_mul_pass(gm):
+    modified = False
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target == torch.add:
             node.target = torch.mul
-    return gm
+            modified = True
+    return PassResult(gm, modified)
 
 def replace_mul_with_div_pass(gm):
+    modified = False
     for node in gm.graph.nodes:
         if node.op == "call_function" and node.target == torch.mul:
             node.target = torch.div
-    return gm
+            modified = True
+    return PassResult(gm, modified)
 
 class AddModule(torch.nn.Module):
     def __init__(self):
@@ -45,7 +50,8 @@ class TestPassManager(TestCase):
         pm.validate_constraints()
         self.assertEqual(len(pm.passes), 2)
 
-        modified_m = pm(traced_m)
+        res = pm(traced_m)
+        modified_m = res.graph_module
         assert isinstance(modified_m, fx.GraphModule)
 
         # Check that all call_function nodes are divs
@@ -148,3 +154,14 @@ class TestPassManager(TestCase):
         ]
         sorted = topological_sort_passes(passes, constraints)
         self.assertEqual(sorted, ([pass2, pass0, pass1], True))
+
+    def test_validation_inputs(self):
+        """
+        Tests that the validation function runs correctly.
+        """
+        m = AddModule()
+        traced_m = torch.fx.symbolic_trace(m)
+        pm = PassManager(passes=[replace_add_with_mul_pass, replace_mul_with_div_pass], run_checks_after_each_pass=True)
+
+        with self.assertRaises(RuntimeError):
+            pm(traced_m, **{"input": torch.ones(1, 3), "rtol": 1e-05})
