@@ -63,10 +63,31 @@ bool SchemaInfo::is_mutable(size_t index) {
   if (!updated_) {
     generateAliasMaps();
   }
+
+  static const c10::FunctionSchema batch_norm_schema = torch::jit::parseSchema(
+      "aten::batch_norm(Tensor input, Tensor? weight, Tensor? bias, Tensor? running_mean, Tensor? running_var, bool training, float momentum, float eps, bool cudnn_enabled) -> Tensor");
+  static const c10::FunctionSchema instance_norm_schema = torch::jit::parseSchema(
+      "aten::instance_norm(Tensor input, Tensor? weight, Tensor? bias, Tensor? running_mean, Tensor? running_var, bool use_input_stats, float momentum, float eps, bool cudnn_enabled) -> Tensor");
+
   return std::any_of(
       input_alias_map_[index].begin(),
       input_alias_map_[index].end(),
-      [this](size_t index) { return this->schema_.is_mutable(index); });
+      [this](size_t index) {
+        if (batch_norm_schema == this->schema_ &&
+            (this->schema_.arguments()[index].name() == "running_mean" ||
+             this->schema_.arguments()[index].name() == "running_var")) {
+          return value_map_.count("training") &&
+              value_map_.at("training").toBool();
+        } else if (
+            instance_norm_schema == this->schema_ &&
+            (this->schema_.arguments()[index].name() == "running_mean" ||
+             this->schema_.arguments()[index].name() == "running_var")) {
+          return value_map_.count("use_input_stats") &&
+              value_map_.at("use_input_stats").toBool();
+        } else {
+          return this->schema_.is_mutable(index);
+        }
+      });
 }
 
 bool SchemaInfo::is_mutable(c10::string_view name) {
@@ -80,7 +101,12 @@ bool SchemaInfo::is_mutable(c10::string_view name) {
 bool SchemaInfo::is_nondeterministic() const {
   static const std::vector<c10::FunctionSchema> nondeterministic_ops =
       getNonDeterministicOps();
-
+  static const c10::FunctionSchema detach_schema = torch::jit::parseSchema(
+      "aten::dropout(Tensor input, float p, bool train) -> Tensor");
+  if (detach_schema == this->schema_ && value_map_.count("train") &&
+      !value_map_.at("train").toBool()) {
+    return false;
+  }
   return std::any_of(
       nondeterministic_ops.begin(),
       nondeterministic_ops.end(),
